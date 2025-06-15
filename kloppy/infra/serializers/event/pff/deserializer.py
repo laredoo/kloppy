@@ -1,4 +1,5 @@
 import json
+import logging
 
 from typing import Any, Dict, List, NamedTuple, IO, Optional, Tuple, Union
 
@@ -16,6 +17,11 @@ from kloppy.domain import (
 )
 from kloppy.infra.serializers.event.deserializer import EventDataDeserializer
 from kloppy.exceptions import DeserializationError
+from kloppy.utils import performance_logging
+
+from . import specification as PFF
+
+logger = logging.getLogger(__name__)
 
 
 class PFFEventDataInput(NamedTuple):
@@ -42,6 +48,36 @@ class PFFEventDeserializer(EventDataDeserializer[PFFEventDataInput]):
     def provider(self) -> Provider:
         return Provider.PFF
 
+    def load_raw_events(self, raw_event_data: IO[bytes]) -> dict[str, PFF.EVENT]:
+        def get_event_position(event: Dict[str, Any]) -> Optional[Point]:
+            all_players = event["homePlayers"] + event["awayPlayers"]
+
+            event_player_id = event["gameEvents"]["playerId"]
+
+            x, y = [
+                (player["x"], player["y"])
+                for player in all_players
+                if player["playerId"] == event_player_id
+            ].pop()
+
+            return x, y
+
+        raw_events = {}
+        events = json.load(raw_event_data)
+        events = sorted(events, key=lambda x: x["eventTime"])
+        for event in events:
+            sufix = ""
+            if event["gameEvents"]["playerId"]:
+                x, y = get_event_position(event)
+                sufix = f"_x_{x}_y_{y}"
+            event_id = (
+                f"{event['gameEventId']}_{event['possessionEventId']}_{event['gameEvents']['gameEventType']}_{event['eventTime']}"
+                if event["possessionEventId"] is not None
+                else f"{event['gameEventId']}"
+            ) + sufix
+            raw_events[event_id] = PFF.event_decoder(event)
+        return raw_events
+
     def load_data(
         self, inputs: PFFEventDataInput
     ) -> tuple[IO[bytes], IO[bytes], IO[bytes]]:
@@ -49,7 +85,7 @@ class PFFEventDeserializer(EventDataDeserializer[PFFEventDataInput]):
         Load data from the input files.
         """
         return (
-            json.load(inputs.event_data),
+            self.load_raw_events(inputs.event_data),
             json.load(inputs.meta_data),
             json.load(inputs.roster_data),
         )
@@ -288,8 +324,6 @@ class PFFEventDeserializer(EventDataDeserializer[PFFEventDataInput]):
         Build the events from the raw event data.
         """
 
-        event_factory = EventFactory()
-
         events = [
             self.transform_event(
                 event=event,
@@ -306,56 +340,72 @@ class PFFEventDeserializer(EventDataDeserializer[PFFEventDataInput]):
         Deserialize the PFF event.
         """
         try:
-            raw_events, meta_data, roster_data = self.load_data(inputs)
+            with performance_logging("load data", logger=logger):
+                raw_events, meta_data, roster_data = self.load_data(inputs)
 
-            actual_meta_data = meta_data.pop()
+            with performance_logging("parse data", logger=logger):
+                actual_meta_data = meta_data.pop()
 
-            metadata_information = self.get_match_information(actual_meta_data)
+                metadata_information = self.get_match_information(actual_meta_data)
 
-            pitch_size_width, pitch_size_length = self.get_pitch_information(
-                metadata_information["stadium"]
-            )
+                pitch_size_width, pitch_size_length = self.get_pitch_information(
+                    metadata_information["stadium"]
+                )
 
-            self.transformer = self.get_transformer(
-                pitch_length=pitch_size_length,
-                pitch_width=pitch_size_width,
-                provider=self.provider,
-            )
+                self.transformer = self.get_transformer(
+                    pitch_length=pitch_size_length,
+                    pitch_width=pitch_size_width,
+                    provider=self.provider,
+                )
 
-            home_team = self.build_team(
-                team_data=metadata_information["home_team"],
-                rooster_data=roster_data,
-                ground_type="home",
-            )
+            with performance_logging("parse teams", logger=logger):
+                home_team = self.build_team(
+                    team_data=metadata_information["home_team"],
+                    rooster_data=roster_data,
+                    ground_type="home",
+                )
 
-            away_team = self.build_team(
-                team_data=metadata_information["away_team"],
-                rooster_data=roster_data,
-                ground_type="away",
-            )
+                away_team = self.build_team(
+                    team_data=metadata_information["away_team"],
+                    rooster_data=roster_data,
+                    ground_type="away",
+                )
 
-            teams = [home_team, away_team]
+                teams = [home_team, away_team]
 
-            orientation = self.get_orientation(actual_meta_data)
+            with performance_logging("parse periods", logger=logger):
+                periods = self.build_periods(
+                    metadata=actual_meta_data,
+                )
 
-            periods = self.build_periods(
-                metadata=actual_meta_data,
-            )
+            with performance_logging("parse metadata", logger=logger):
+                orientation = self.get_orientation(actual_meta_data)
 
-            metadata = self.get_metadata_information(
-                match_information=metadata_information,
-                teams=teams,
-                orientation=orientation,
-                periods=periods,
-            )
+                metadata = self.get_metadata_information(
+                    match_information=metadata_information,
+                    teams=teams,
+                    orientation=orientation,
+                    periods=periods,
+                )
 
-            events = self.build_events(
-                raw_events=raw_events,
-                home_team=home_team,
-                away_team=away_team,
-            )
+            with performance_logging("parse events", logger=logger):
+                # events = self.build_events(
+                #     raw_events=raw_events,
+                #     home_team=home_team,
+                #     away_team=away_team,
+                # )
+                events = []
 
-            return EventDataset(events=None, metadata=metadata)
+                for raw_event in raw_events.values():
+                    new_events = raw_event.set_refs(
+                        periods, teams, raw_events
+                    ).deserialize(self.event_factory)
+                    for event in new_events:
+                        if self.should_include_event(event):
+                            event = self.transformer.transform_event(event)
+                            events.append(event)
+
+            return EventDataset(records=events, metadata=metadata)
 
         except Exception as e:
             raise DeserializationError(

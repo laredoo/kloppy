@@ -5,15 +5,13 @@ from kloppy.infra.serializers.tracking.pff import (
 )
 from kloppy.domain import EventDataset
 from kloppy.io import FileLike, open_as_file
-from kloppy.infra.serializers.event.pff import (
-    PFFEventDeserializer,
-    PFFEventDataInput
-)
+from kloppy.infra.serializers.event.pff import PFFEventDeserializer, PFFEventDataInput
+
 
 def load_event(
-    event_data: FileLike,
     meta_data: FileLike,
     roster_data: FileLike,
+    event_data: FileLike,
     coordinates: Optional[str] = None,
 ) -> EventDataset:
     """
@@ -27,12 +25,12 @@ def load_event(
     Returns:
         EventDataset: A deserialized EventDataset object containing the processed event data.
     """
-    deserializer = PFFEventDeserializer(
-        coordinate_system=coordinates
-    )
-    with open_as_file(event_data) as event_data_fp, open_as_file(
-        roster_data
-    ) as roster_data_fp, open_as_file(meta_data) as meta_data_fp:
+    deserializer = PFFEventDeserializer(coordinate_system=coordinates)
+    with (
+        open_as_file(event_data) as event_data_fp,
+        open_as_file(roster_data) as roster_data_fp,
+        open_as_file(meta_data) as meta_data_fp,
+    ):
         return deserializer.deserialize(
             inputs=PFFEventDataInput(
                 event_data=event_data_fp,
@@ -40,6 +38,7 @@ def load_event(
                 roster_data=roster_data_fp,
             )
         )
+
 
 def load_tracking(
     meta_data: FileLike,
@@ -71,9 +70,11 @@ def load_tracking(
         coordinate_system=coordinates,
         only_alive=only_alive,
     )
-    with open_as_file(meta_data) as meta_data_fp, open_as_file(
-        roster_meta_data
-    ) as roster_meta_data_fp, open_as_file(raw_data) as raw_data_fp:
+    with (
+        open_as_file(meta_data) as meta_data_fp,
+        open_as_file(roster_meta_data) as roster_meta_data_fp,
+        open_as_file(raw_data) as raw_data_fp,
+    ):
         return deserializer.deserialize(
             inputs=PFF_TrackingInputs(
                 meta_data=meta_data_fp,
