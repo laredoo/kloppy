@@ -49,32 +49,15 @@ class PFFEventDeserializer(EventDataDeserializer[PFFEventDataInput]):
         return Provider.PFF
 
     def load_raw_events(self, raw_event_data: IO[bytes]) -> dict[str, PFF.EVENT]:
-        def get_event_position(event: Dict[str, Any]) -> Optional[Point]:
-            all_players = event["homePlayers"] + event["awayPlayers"]
-
-            event_player_id = event["gameEvents"]["playerId"]
-
-            x, y = [
-                (player["x"], player["y"])
-                for player in all_players
-                if player["playerId"] == event_player_id
-            ].pop()
-
-            return x, y
-
         raw_events = {}
         events = json.load(raw_event_data)
         events = sorted(events, key=lambda x: x["eventTime"])
         for event in events:
-            sufix = ""
-            if event["gameEvents"]["playerId"]:
-                x, y = get_event_position(event)
-                sufix = f"_x_{x}_y_{y}"
             event_id = (
                 f"{event['gameEventId']}_{event['possessionEventId']}_{event['gameEvents']['gameEventType']}_{event['eventTime']}"
                 if event["possessionEventId"] is not None
                 else f"{event['gameEventId']}"
-            ) + sufix
+            )
             raw_events[event_id] = PFF.event_decoder(event)
         return raw_events
 
